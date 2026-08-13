@@ -124,3 +124,5 @@ docker build -f Dockerfile.keycloak-26.7.1 -t keywind:keycloak-26 .
 ```
 
 The default `Dockerfile` is pinned to Keycloak `26.7.1` and is the recommended version for new deployments.
+
+For compatibility with the latest Keycloak UI, the theme inherits from the built-in `keycloak.v3` parent theme before layering custom Keywind styling. This minimizes rendering regressions while still keeping the branded design.

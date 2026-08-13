@@ -3,6 +3,7 @@ import colors from 'tailwindcss/colors';
 
 export default {
   content: ['./theme/**/*.ftl'],
+  darkMode: 'media',
   experimental: {
     optimizeUniversalDefaults: true,
   },
@@ -11,7 +12,7 @@ export default {
     extend: {
       colors: {
         primary: colors.blue,
-        secondary: colors.gray,
+        secondary: colors.slate,
 
         provider: {
           apple: '#000000',

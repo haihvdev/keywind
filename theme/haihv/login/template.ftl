@@ -44,7 +44,7 @@
     </#if>
     <#nested "form">
     <#if displayRequiredFields>
-      <p class="text-secondary-600 text-sm">
+      <p class="text-sm text-slate-600 dark:text-slate-300">
         * ${msg("requiredFields")}
       </p>
     </#if>
@@ -69,18 +69,22 @@
       <@document.kw script=script />
     </head>
     <@body.kw>
-      <@container.kw>
-        <@card.kw content=cardContent footer=cardFooter header=cardHeader />
-        <@nav.kw>
-          <#nested "nav">
-          <#if realm.internationalizationEnabled && locale.supported?size gt 1>
-            <@localeProvider.kw currentLocale=locale.current locales=locale.supported />
-          </#if>
-        </@nav.kw>
-        <div class="mt-4 text-center text-sm text-gray-500">
-          &copy; 2025 vpdkbacninh.vn | haihv.vn
+      <div class="flex min-h-[calc(100vh-3rem)] flex-col sm:min-h-[calc(100vh-5rem)]">
+        <div class="flex w-full flex-1 items-center justify-center">
+          <@container.kw>
+            <@card.kw content=cardContent footer=cardFooter header=cardHeader />
+            <@nav.kw>
+              <#nested "nav">
+              <#if realm.internationalizationEnabled && locale.supported?size gt 1>
+                <@localeProvider.kw currentLocale=locale.current locales=locale.supported />
+              </#if>
+            </@nav.kw>
+          </@container.kw>
         </div>
-      </@container.kw>
+        <div class="pb-1 text-center text-sm text-slate-500 dark:text-slate-400">
+          &copy; ${.now?string("yyyy")} vpdkbacninh.vn | haihv.vn
+        </div>
+      </div>
     </@body.kw>
   </html>
 </#macro>

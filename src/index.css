@@ -2,6 +2,30 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  :root {
+    color-scheme: light dark;
+  }
+
+  html {
+    @apply antialiased;
+  }
+
+  body {
+    @apply min-h-screen bg-slate-100 text-slate-900 transition-colors duration-200;
+    background-image: radial-gradient(circle at top, rgba(59, 130, 246, 0.12), transparent 30%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(248, 250, 252, 0.9));
+  }
+
+  @media (prefers-color-scheme: dark) {
+    body {
+      @apply bg-slate-950 text-slate-100;
+      background-image: radial-gradient(circle at top, rgba(59, 130, 246, 0.18), transparent 32%),
+        linear-gradient(180deg, rgba(2, 6, 23, 0.96), rgba(15, 23, 42, 1));
+    }
+  }
+}
+
 @layer components {
   /* Alpine.js
     ======================================================================== */
@@ -14,13 +38,13 @@
     ======================================================================== */
 
   .separate {
-    @apply flex items-center text-center;
+    @apply flex items-center text-center text-slate-500;
   }
 
   .separate::after,
   .separate::before {
     content: '';
-    @apply border-b border-secondary-200 flex-1;
+    @apply border-b border-secondary-200 flex-1 dark:border-slate-700;
   }
 
   .separate:not(:empty)::after {

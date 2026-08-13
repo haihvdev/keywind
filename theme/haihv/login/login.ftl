@@ -21,7 +21,7 @@
 
   <a
     href="${p.loginUrl}"
-    class="inline-flex items-center justify-center rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-500 shadow-sm hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200 dark:hover:bg-gray-700 <#if useFullName>w-full</#if>"
+    class="inline-flex items-center justify-center rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-medium text-slate-600 shadow-sm transition hover:-translate-y-0.5 hover:border-slate-300 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:bg-slate-800 <#if useFullName>w-full</#if>"
     id="social-${p.alias}"
     type="button"
   >
@@ -50,7 +50,11 @@
   section
 >
   <#if section="header">
-    ${msg("loginAccountTitle")}
+    <div class="flex items-center justify-center">
+      <span class="inline-flex items-center rounded-full border border-primary-200 bg-primary-50 px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-primary-700 dark:border-primary-500/30 dark:bg-primary-500/10 dark:text-primary-300">
+        ${msg("loginAccountTitle")}
+      </span>
+    </div>
   <#elseif section="form">
     <#if realm.password>
       <@form.kw
@@ -81,7 +85,7 @@
           type="password"
         />
         <#if realm.rememberMe && !usernameEditDisabled?? || realm.resetPasswordAllowed>
-          <div class="flex items-center justify-between">
+          <div class="flex items-center justify-between gap-3 pt-1">
             <#if realm.rememberMe && !usernameEditDisabled??>
               <@checkbox.kw
                 checked=login.rememberMe??
@@ -105,7 +109,7 @@
     </#if>
   <#elseif section="info">
     <#if realm.password && realm.registrationAllowed && !registrationDisabled??>
-      <div class="text-center">
+      <div class="text-center text-sm text-slate-600 dark:text-slate-300">
         ${msg("noAccount")}
         <@link.kw color="primary" href=url.registrationUrl>
           ${msg("doRegister")}
@@ -114,26 +118,23 @@
     </#if>
   <#elseif section="socialProviders">
       <#if social.providers?? && social.providers?has_content>
-        <#-- Separator -->
         <div class="mt-6">
           <div class="relative">
             <div class="absolute inset-0 flex items-center" aria-hidden="true">
-              <div class="w-full border-t border-gray-300 dark:border-gray-600"></div>
+              <div class="w-full border-t border-slate-200 dark:border-slate-700"></div>
             </div>
             <div class="relative flex justify-center text-sm">
-              <span class="bg-white px-2 text-gray-500 dark:bg-gray-900 dark:text-gray-400">
+              <span class="bg-white px-2 text-slate-500 dark:bg-slate-900 dark:text-slate-400">
                 ${msg("identity-provider-login-label")}
               </span>
             </div>
           </div>
         </div>
 
-        <#-- Buttons Container - Stacked and Centered -->
-        <div class="mt-6 flex flex-col items-center gap-4"> <#-- Increased gap from gap-3 to gap-4 -->
-          <#-- Loop through all providers -->
+        <div class="mt-6 flex flex-col items-center gap-3">
           <#list social.providers as p>
-            <div class="w-full max-w-xs"> <#-- Container for each button to control max-width -->
-              <@renderProviderButton p=p useFullName=true /> <#-- Always use full name for w-full -->
+            <div class="w-full max-w-xs">
+              <@renderProviderButton p=p useFullName=true />
             </div>
           </#list>
         </div>

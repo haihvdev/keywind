@@ -1,28 +1,28 @@
 <#macro kw color="" component="button" size="" rest...>
   <#switch color>
     <#case "primary">
-      <#assign colorClass="bg-primary-600 text-white focus:ring-primary-600 hover:bg-primary-700">
+      <#assign colorClass="bg-primary-600 text-white shadow-sm hover:bg-primary-500 focus:ring-primary-500">
       <#break>
     <#case "secondary">
-      <#assign colorClass="bg-secondary-100 text-secondary-600 focus:ring-secondary-600 hover:bg-secondary-200 hover:text-secondary-900">
+      <#assign colorClass="bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900 focus:ring-slate-400 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700 dark:hover:text-white">
       <#break>
     <#default>
-      <#assign colorClass="bg-primary-600 text-white focus:ring-primary-600 hover:bg-primary-700">
+      <#assign colorClass="bg-primary-600 text-white shadow-sm hover:bg-primary-500 focus:ring-primary-500">
   </#switch>
 
   <#switch size>
     <#case "medium">
-      <#assign sizeClass="px-4 py-2 text-sm">
+      <#assign sizeClass="px-4 py-2.5 text-sm font-medium">
       <#break>
     <#case "small">
-      <#assign sizeClass="px-2 py-1 text-xs">
+      <#assign sizeClass="px-2.5 py-1.5 text-xs font-medium">
       <#break>
     <#default>
-      <#assign sizeClass="px-4 py-2 text-sm">
+      <#assign sizeClass="px-4 py-2.5 text-sm font-medium">
   </#switch>
 
   <${component}
-    class="${colorClass} ${sizeClass} flex justify-center relative rounded-lg w-full focus:outline-none focus:ring-2 focus:ring-offset-2"
+    class="${colorClass} ${sizeClass} relative flex w-full justify-center rounded-xl focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-white transition-colors duration-200 dark:focus:ring-offset-slate-900"
 
     <#list rest as attrName, attrValue>
       ${attrName}="${attrValue}"
