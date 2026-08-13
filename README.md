@@ -112,3 +112,15 @@ To deploy a theme as an archive, create a JAR archive with the theme resources.
 ```bash
 pnpm build:jar
 ```
+
+## Versioned Dockerfiles
+
+To make Keycloak upgrades safer, this repository keeps a Dockerfile for each upgrade step. Use the matching file for the target Keycloak version:
+
+```bash
+docker build -f Dockerfile.keycloak-22.0.1 -t keywind:keycloak-22 .
+docker build -f Dockerfile.keycloak-24 -t keywind:keycloak-24 .
+docker build -f Dockerfile.keycloak-26.7.1 -t keywind:keycloak-26 .
+```
+
+The default `Dockerfile` is pinned to Keycloak `26.7.1` and is the recommended version for new deployments.
