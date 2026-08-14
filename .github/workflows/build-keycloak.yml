@@ -1,0 +1,117 @@
+name: Build Keycloak images
+
+# Builds the haihv login theme image per Keycloak version, discovered from
+# Dockerfile.keycloak-<version> files plus the default Dockerfile's FROM
+# line. Images are pushed to ghcr.io/<owner>/<repo>:<version>.
+#
+# Trigger manually from the Actions tab; optionally pass a comma-separated
+# list of versions (e.g. "26.7.1,24") to build only those. Leave empty to
+# build every detected version. The default Dockerfile's version is also
+# tagged as :latest.
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Keycloak versions to build (comma-separated, e.g. "26.7.1,24"). Empty = all detected versions'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      default: ${{ steps.set.outputs.default }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect Keycloak versions
+        id: set
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          default_version=$(sed -n 's/^FROM quay\.io\/keycloak\/keycloak:\([^[:space:]]*\).*/\1/p' Dockerfile | head -n1)
+          if [ -z "$default_version" ]; then
+            echo "Could not parse Keycloak version from Dockerfile FROM line" >&2
+            exit 1
+          fi
+          echo "default=$default_version" >> "$GITHUB_OUTPUT"
+
+          filter="${{ inputs.versions }}"
+          filter="$(echo "$filter" | xargs)"
+
+          items=""
+          while IFS= read -r v; do
+            [ -z "$v" ] && continue
+            keep=1
+            if [ -n "$filter" ]; then
+              keep=0
+              for w in $(echo "$filter" | tr ',' ' '); do
+                [ "$(echo "$w" | xargs)" = "$v" ] && keep=1
+            done
+            fi
+            [ "$keep" = "1" ] || continue
+            if [ "$v" = "$default_version" ]; then
+              df="Dockerfile"
+              isdef=true
+            else
+              df="Dockerfile.keycloak-$v"
+              isdef=false
+            fi
+            items="$items{\"version\":\"$v\",\"dockerfile\":\"$df\",\"is_default\":$isdef},"
+          done < <({ ls Dockerfile.keycloak-* 2>/dev/null | sed 's/^Dockerfile.keycloak-//'; echo "$default_version"; } | sort -u)
+
+          items="${items%,}"
+          if [ -n "$filter" ] && [ -z "$items" ]; then
+            echo "No Dockerfile matches versions: $filter" >&2
+            exit 1
+          fi
+
+          matrix="{\"include\":[$items]}"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "Detected matrix: $matrix"
+
+  build:
+    runs-on: ubuntu-latest
+    needs: detect
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.detect.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags="${image}:${{ matrix.version }}"
+          if [ "${{ matrix.is_default }}" = "true" ]; then
+            tags="${tags},${image}:latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
