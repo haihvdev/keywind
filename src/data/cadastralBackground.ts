@@ -3,17 +3,17 @@
  *
  * Renders an HTML5 canvas that resembles a land parcel map: a Voronoi
  * mosaic of roughly 4-7-sided convex parcels, survey-station marks, and
- * parcels that light up one after another
- * (like plots being registered). Entity badges — database, person,
- * organization, government, location, document, ledger, signature,
- * certificate — drift across the map: they wander on
- * their own and are gently attracted to the cursor, which also casts a soft
- * spotlight on the grid. Nearby entities are linked like a network.
+ * parcels that light up one after another (like plots being registered).
+ * Entity badges — database, person, organization, government, location,
+ * document, ledger, signature, certificate — drift across the map: they
+ * wander on their own and are gently attracted to the cursor, which also
+ * casts a soft spotlight on the grid. Nearby entities are linked like a
+ * network.
  *
- * The canvas is transparent, pointer-events: none, and drawn behind the login
- * card. It respects `prefers-reduced-motion` (renders a single static frame)
- * and `prefers-color-scheme` (light / dark palettes). The grid pattern is
- * re-randomized on every page load.
+ * The canvas is transparent, pointer-events: none, and drawn behind the
+ * login card. It respects `prefers-reduced-motion` (renders a single
+ * static frame) and `prefers-color-scheme` (light / dark palettes). The
+ * grid pattern is re-randomized on every page load.
  */
 
 type RGB = [number, number, number];
@@ -149,10 +149,6 @@ const STATIC_ENTITIES: ReadonlyArray<readonly [number, number, EntityKind]> = [
   [0.7, 0.75, 'certificate'],
 ];
 
-function rgba([r, g, b]: RGB, alpha: number): string {
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
 /** Seed for the grid jitter; re-randomized on each page load. */
 let gridSeed = Math.random() * 1e6;
 
@@ -170,6 +166,10 @@ function seededHash(x: number, y: number): number {
 function smoothstep(t: number): number {
   const clamped = Math.min(1, Math.max(0, t));
   return clamped * clamped * (3 - 2 * clamped);
+}
+
+function rgba([r, g, b]: RGB, alpha: number): string {
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 /** Clip a convex polygon (x,y pairs) to the half-plane closer to p than to q. */
