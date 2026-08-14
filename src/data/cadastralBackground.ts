@@ -1,8 +1,9 @@
 /**
  * Animated cadastral (land-registry) background for the login page.
  *
- * Renders an HTML5 canvas that resembles a land parcel map: a jittered parcel
- * grid, survey-station marks, and parcels that light up one after another
+ * Renders an HTML5 canvas that resembles a land parcel map: a Voronoi
+ * mosaic of roughly 4-7-sided convex parcels, survey-station marks, and
+ * parcels that light up one after another
  * (like plots being registered). Entity badges — database, person,
  * organization, government, location, document, ledger, signature,
  * certificate — drift across the map: they wander on
@@ -11,7 +12,8 @@
  *
  * The canvas is transparent, pointer-events: none, and drawn behind the login
  * card. It respects `prefers-reduced-motion` (renders a single static frame)
- * and `prefers-color-scheme` (light / dark palettes).
+ * and `prefers-color-scheme` (light / dark palettes). The grid pattern is
+ * re-randomized on every page load.
  */
 
 type RGB = [number, number, number];
@@ -28,18 +30,21 @@ interface Palette {
   spotlight: RGB;
 }
 
+interface Parcel {
+  /** Convex polygon vertices as [x0, y0, x1, y1, ...] in CSS pixels. */
+  vertices: number[];
+  cx: number;
+  cy: number;
+}
+
 interface Geometry {
   width: number;
   height: number;
-  cols: number;
-  rows: number;
-  xs: Float32Array;
-  ys: Float32Array;
+  parcels: Parcel[];
 }
 
 interface Pulse {
-  col: number;
-  row: number;
+  parcel: number;
   start: number;
 }
 
@@ -80,8 +85,7 @@ interface MouseState {
 }
 
 interface HoverCell {
-  col: number;
-  row: number;
+  parcel: number;
   start: number;
 }
 
@@ -110,7 +114,8 @@ const PALETTE_DARK: Palette = {
 };
 
 const CELL_TARGET = 176; // approximate parcel size in CSS pixels
-const JITTER_RATIO = 0.3;
+const SEED_JITTER = 0.42; // seed displacement as a fraction of cell size
+const RELAX_STEPS = 1; // Lloyd relaxation passes to even out parcel sizes
 const PULSE_LIFETIME = 4600;
 const PULSE_SPAWN_BASE = 900;
 const PULSE_MAX = 8;
@@ -148,10 +153,18 @@ function rgba([r, g, b]: RGB, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+/** Seed for the grid jitter; re-randomized on each page load. */
+let gridSeed = Math.random() * 1e6;
+
 /** Deterministic pseudo-random in [0, 1) from two integer coordinates. */
 function hash(x: number, y: number): number {
   const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
   return n - Math.floor(n);
+}
+
+/** Grid-dependent hash: same input coordinates, different pattern per seed. */
+function seededHash(x: number, y: number): number {
+  return hash(x + gridSeed * 13.37, y + gridSeed * 7.77);
 }
 
 function smoothstep(t: number): number {
@@ -159,39 +172,112 @@ function smoothstep(t: number): number {
   return clamped * clamped * (3 - 2 * clamped);
 }
 
+/** Clip a convex polygon (x,y pairs) to the half-plane closer to p than to q. */
+function clipByBisector(poly: number[], px: number, py: number, qx: number, qy: number): number[] {
+  const mx = (px + qx) / 2;
+  const my = (py + qy) / 2;
+  const dx = qx - px;
+  const dy = qy - py;
+  const out: number[] = [];
+  const count = poly.length / 2;
+  for (let i = 0; i < count; i++) {
+    const j = (i + 1) % count;
+    const ax = poly[i * 2];
+    const ay = poly[i * 2 + 1];
+    const bx = poly[j * 2];
+    const by = poly[j * 2 + 1];
+    const sa = (ax - mx) * dx + (ay - my) * dy;
+    const sb = (bx - mx) * dx + (by - my) * dy;
+    if (sa <= 0) out.push(ax, ay);
+    if ((sa < 0 && sb > 0) || (sa > 0 && sb < 0)) {
+      const t = sa / (sa - sb);
+      out.push(ax + (bx - ax) * t, ay + (by - ay) * t);
+    }
+  }
+  return out;
+}
+
+/** Voronoi cell of seeds[idx] (flat x,y pairs) clipped to the viewport. */
+function voronoiCell(seeds: number[], idx: number, width: number, height: number): number[] {
+  let poly = [0, 0, width, 0, width, height, 0, height];
+  const px = seeds[idx * 2];
+  const py = seeds[idx * 2 + 1];
+  for (let k = 0; k < seeds.length / 2; k++) {
+    if (k === idx) continue;
+    poly = clipByBisector(poly, px, py, seeds[k * 2], seeds[k * 2 + 1]);
+    if (poly.length < 6) break;
+  }
+  return poly;
+}
+
+function polygonCentroid(poly: number[]): [number, number] {
+  let sx = 0;
+  let sy = 0;
+  const count = poly.length / 2;
+  for (let i = 0; i < count; i++) {
+    sx += poly[i * 2];
+    sy += poly[i * 2 + 1];
+  }
+  return [sx / count, sy / count];
+}
+
+/**
+ * Cadastral tessellation: Voronoi cells of a jittered point lattice. Cells
+ * come out as convex polygons with roughly 4-7 sides — like real land
+ * parcels — instead of a uniform quad grid.
+ */
 function buildGeometry(width: number, height: number): Geometry {
   const cols = Math.max(3, Math.ceil(width / CELL_TARGET));
   const rows = Math.max(3, Math.ceil(height / CELL_TARGET));
   const cellW = width / cols;
   const cellH = height / rows;
-  const xs = new Float32Array((cols + 1) * (rows + 1));
-  const ys = new Float32Array((cols + 1) * (rows + 1));
 
-  for (let row = 0; row <= rows; row++) {
-    for (let col = 0; col <= cols; col++) {
-      const index = row * (cols + 1) + col;
-      const jx = (hash(row, col) - 0.5) * 2 * JITTER_RATIO * cellW;
-      const jy = (hash(row + 57, col + 91) - 0.5) * 2 * JITTER_RATIO * cellH;
-      xs[index] = col * cellW + jx;
-      ys[index] = row * cellH + jy;
+  // Seeds span one extra ring outside the viewport so border cells clip well.
+  let seeds: number[] = [];
+  for (let row = 0; row < rows + 2; row++) {
+    for (let col = 0; col < cols + 2; col++) {
+      const jx = (seededHash(row, col) - 0.5) * 2 * SEED_JITTER * cellW;
+      const jy = (seededHash(row + 57, col + 91) - 0.5) * 2 * SEED_JITTER * cellH;
+      seeds.push((col - 1) * cellW + cellW / 2 + jx, (row - 1) * cellH + cellH / 2 + jy);
     }
   }
 
-  return { width, height, cols, rows, xs, ys };
+  // Lloyd relaxation: move each seed to its cell centroid so parcels stay
+  // even-sized and slivers are rare.
+  for (let step = 0; step < RELAX_STEPS; step++) {
+    const relaxed: number[] = new Array(seeds.length);
+    for (let i = 0; i < seeds.length / 2; i++) {
+      const cell = voronoiCell(seeds, i, width, height);
+      const [cx, cy] = polygonCentroid(cell.length >= 6 ? cell : [seeds[i * 2], seeds[i * 2 + 1]]);
+      relaxed[i * 2] = cx;
+      relaxed[i * 2 + 1] = cy;
+    }
+    seeds = relaxed;
+  }
+
+  const parcels: Parcel[] = [];
+  for (let i = 0; i < seeds.length / 2; i++) {
+    const vertices = voronoiCell(seeds, i, width, height);
+    if (vertices.length < 6) continue; // degenerate, fully clipped away
+    const [cx, cy] = polygonCentroid(vertices);
+    parcels.push({ vertices, cx, cy });
+  }
+
+  return { width, height, parcels };
 }
 
 function spawnEntities(geometry: Geometry): Entity[] {
   const entities: Entity[] = [];
   for (let i = 0; i < ENTITY_COUNT; i++) {
-    const angle = hash(i, 3) * Math.PI * 2;
+    const angle = Math.random() * Math.PI * 2;
     entities.push({
-      x: BOUND_MARGIN + hash(i, 5) * (geometry.width - BOUND_MARGIN * 2),
-      y: BOUND_MARGIN + hash(i, 9) * (geometry.height - BOUND_MARGIN * 2),
+      x: BOUND_MARGIN + Math.random() * (geometry.width - BOUND_MARGIN * 2),
+      y: BOUND_MARGIN + Math.random() * (geometry.height - BOUND_MARGIN * 2),
       vx: Math.cos(angle) * ENTITY_SPEED * 0.5,
       vy: Math.sin(angle) * ENTITY_SPEED * 0.5,
       wander: angle,
       kind: ENTITY_KINDS[i % ENTITY_KINDS.length],
-      size: 10 + hash(i, 17) * 3,
+      size: 10 + Math.random() * 3,
     });
   }
   return entities;
@@ -232,7 +318,7 @@ export function initCadastralBackground(): void {
     canvas.height = Math.round(height * dpr);
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     geometry = buildGeometry(width, height);
-    pulses = pulses.filter(({ col, row }) => col < geometry.cols && row < geometry.rows);
+    pulses = pulses.filter(({ parcel }) => parcel < geometry.parcels.length);
     for (const entity of entities) {
       entity.x = Math.min(Math.max(entity.x, BOUND_MARGIN), geometry.width - BOUND_MARGIN);
       entity.y = Math.min(Math.max(entity.y, BOUND_MARGIN), geometry.height - BOUND_MARGIN);
@@ -242,32 +328,27 @@ export function initCadastralBackground(): void {
     }
   };
 
-  const vertexX = (row: number, col: number): number => geometry.xs[row * (geometry.cols + 1) + col];
-  const vertexY = (row: number, col: number): number => geometry.ys[row * (geometry.cols + 1) + col];
-
-  const traceParcel = (col: number, row: number): void => {
+  const traceParcel = (index: number): void => {
+    const { vertices } = geometry.parcels[index];
     context.beginPath();
-    context.moveTo(vertexX(row, col), vertexY(row, col));
-    context.lineTo(vertexX(row, col + 1), vertexY(row, col + 1));
-    context.lineTo(vertexX(row + 1, col + 1), vertexY(row + 1, col + 1));
-    context.lineTo(vertexX(row + 1, col), vertexY(row + 1, col));
+    context.moveTo(vertices[0], vertices[1]);
+    for (let i = 2; i < vertices.length; i += 2) {
+      context.lineTo(vertices[i], vertices[i + 1]);
+    }
     context.closePath();
   };
 
-  const parcelCentroid = (col: number, row: number): [number, number] => {
-    const xs = [vertexX(row, col), vertexX(row, col + 1), vertexX(row + 1, col + 1), vertexX(row + 1, col)];
-    const ys = [vertexY(row, col), vertexY(row, col + 1), vertexY(row + 1, col + 1), vertexY(row + 1, col)];
-    return [xs.reduce((a, b) => a + b, 0) / 4, ys.reduce((a, b) => a + b, 0) / 4];
-  };
-
-  const pointInParcel = (col: number, row: number, x: number, y: number): boolean => {
+  /** Point-in-polygon test for a convex parcel (all same-sign cross products). */
+  const pointInParcel = (index: number, x: number, y: number): boolean => {
+    const { vertices } = geometry.parcels[index];
+    const count = vertices.length / 2;
     let sign = 0;
-    for (let i = 0; i < 4; i++) {
-      const ax = vertexX(row + (i === 1 || i === 2 ? 1 : 0), col + (i === 1 || i === 2 ? i - 1 : (i === 3 ? 1 : 0)));
-      const ay = vertexY(row + (i === 1 || i === 2 ? 1 : 0), col + (i === 1 || i === 2 ? i - 1 : (i === 3 ? 1 : 0)));
-      const j = (i + 1) % 4;
-      const bx = vertexX(row + (j === 1 || j === 2 ? 1 : 0), col + (j === 1 || j === 2 ? j - 1 : (j === 3 ? 1 : 0)));
-      const by = vertexY(row + (j === 1 || j === 2 ? 1 : 0), col + (j === 1 || j === 2 ? j - 1 : (j === 3 ? 1 : 0)));
+    for (let i = 0; i < count; i++) {
+      const j = (i + 1) % count;
+      const ax = vertices[i * 2];
+      const ay = vertices[i * 2 + 1];
+      const bx = vertices[j * 2];
+      const by = vertices[j * 2 + 1];
       const cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
       if (cross === 0) continue;
       const crossSign = Math.sign(cross);
@@ -277,56 +358,42 @@ export function initCadastralBackground(): void {
     return true;
   };
 
-  /**
-   * Parcel cell containing a point, or null. Vertex jitter can push a quad
-   * across its nominal cell, so the 3x3 neighborhood of the index-derived
-   * cell is tested with point-in-polygon.
-   */
-  const parcelAt = (x: number, y: number): [number, number] | null => {
-    const cellW = geometry.width / geometry.cols;
-    const cellH = geometry.height / geometry.rows;
-    const col0 = Math.floor(x / cellW);
-    const row0 = Math.floor(y / cellH);
-    for (let dr = -1; dr <= 1; dr++) {
-      for (let dc = -1; dc <= 1; dc++) {
-        const col = col0 + dc;
-        const row = row0 + dr;
-        if (col < 0 || row < 0 || col >= geometry.cols || row >= geometry.rows) continue;
-        if (pointInParcel(col, row, x, y)) return [col, row];
-      }
+  const parcelAt = (x: number, y: number): number => {
+    for (let i = 0; i < geometry.parcels.length; i++) {
+      if (pointInParcel(i, x, y)) return i;
     }
-    return null;
+    return -1;
   };
 
   const drawGrid = (): void => {
     context.beginPath();
-    for (let row = 0; row <= geometry.rows; row++) {
-      for (let col = 0; col <= geometry.cols; col++) {
-        if (col < geometry.cols) {
-          context.moveTo(vertexX(row, col), vertexY(row, col));
-          context.lineTo(vertexX(row, col + 1), vertexY(row, col + 1));
-        }
-        if (row < geometry.rows) {
-          context.moveTo(vertexX(row, col), vertexY(row, col));
-          context.lineTo(vertexX(row + 1, col), vertexY(row + 1, col));
-        }
+    for (const parcel of geometry.parcels) {
+      const { vertices } = parcel;
+      context.moveTo(vertices[0], vertices[1]);
+      for (let i = 2; i < vertices.length; i += 2) {
+        context.lineTo(vertices[i], vertices[i + 1]);
       }
+      context.closePath();
     }
     context.strokeStyle = rgba(palette.grid, darkQuery.matches ? 0.1 : 0.13);
     context.lineWidth = 1;
     context.stroke();
   };
 
-  /** Small "+" marks on some vertices, like survey stations on a parcel map. */
+  /** Small "+" marks on some parcel vertices, like survey stations on a map. */
   const drawStations = (): void => {
     context.strokeStyle = rgba(palette.station, darkQuery.matches ? 0.22 : 0.3);
     context.lineWidth = 1;
     context.beginPath();
-    for (let row = 1; row < geometry.rows; row++) {
-      for (let col = 1; col < geometry.cols; col++) {
-        if (hash(row * 3 + 11, col * 7 + 5) < 0.12) {
-          const x = vertexX(row, col);
-          const y = vertexY(row, col);
+    const seen = new Set<number>();
+    for (const parcel of geometry.parcels) {
+      for (let i = 0; i < parcel.vertices.length; i += 2) {
+        const x = Math.round(parcel.vertices[i]);
+        const y = Math.round(parcel.vertices[i + 1]);
+        const key = x * 100000 + y;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (seededHash(x, y) < 0.12) {
           context.moveTo(x - 4, y);
           context.lineTo(x + 4, y);
           context.moveTo(x, y - 4);
@@ -348,10 +415,9 @@ export function initCadastralBackground(): void {
     nextSpawn = now + PULSE_SPAWN_BASE + hash(pulses.length, Math.floor(now / 1000)) * 700;
 
     for (let attempt = 0; attempt < 12; attempt++) {
-      const col = Math.floor(hash(attempt, Math.floor(now / 37)) * geometry.cols);
-      const row = Math.floor(hash(Math.floor(now / 53), attempt) * geometry.rows);
-      if (pulses.some((p) => p.col === col && p.row === row)) continue;
-      pulses.push({ col, row, start: now });
+      const parcel = Math.floor(hash(attempt, Math.floor(now / 37)) * geometry.parcels.length);
+      if (pulses.some((p) => p.parcel === parcel)) continue;
+      pulses.push({ parcel, start: now });
       return;
     }
   };
@@ -363,7 +429,7 @@ export function initCadastralBackground(): void {
       const alpha = pulseAlpha(pulse, now);
       if (alpha <= 0) continue;
 
-      traceParcel(pulse.col, pulse.row);
+      traceParcel(pulse.parcel);
       context.fillStyle = rgba(palette.parcelFill, alpha * (darkQuery.matches ? 0.12 : 0.1));
       context.fill();
 
@@ -371,23 +437,19 @@ export function initCadastralBackground(): void {
       context.lineWidth = 1.5;
       context.stroke();
 
-      // Corner stakes
+      // Corner stakes at every parcel vertex
+      const { vertices } = geometry.parcels[pulse.parcel];
       context.fillStyle = rgba(palette.stake, alpha * 0.75);
-      for (const [dc, dr] of [
-        [0, 0],
-        [1, 0],
-        [1, 1],
-        [0, 1],
-      ] as const) {
+      for (let i = 0; i < vertices.length; i += 2) {
         context.beginPath();
-        context.arc(vertexX(pulse.row + dr, pulse.col + dc), vertexY(pulse.row + dr, pulse.col + dc), 2.5, 0, Math.PI * 2);
+        context.arc(vertices[i], vertices[i + 1], 2.5, 0, Math.PI * 2);
         context.fill();
       }
 
       // Expanding ring at the centroid, like a marker being dropped
       const progress = (now - pulse.start) / PULSE_LIFETIME;
       if (progress < 0.4) {
-        const [cx, cy] = parcelCentroid(pulse.col, pulse.row);
+        const { cx, cy } = geometry.parcels[pulse.parcel];
         const ringProgress = progress / 0.4;
         context.beginPath();
         context.arc(cx, cy, 4 + ringProgress * 22, 0, Math.PI * 2);
@@ -422,13 +484,13 @@ export function initCadastralBackground(): void {
       hover = null;
       return;
     }
-    const cell = parcelAt(mouse.x, mouse.y);
-    if (!cell) {
+    const parcel = parcelAt(mouse.x, mouse.y);
+    if (parcel < 0) {
       hover = null;
       return;
     }
-    if (!hover || hover.col !== cell[0] || hover.row !== cell[1]) {
-      hover = { col: cell[0], row: cell[1], start: now };
+    if (!hover || hover.parcel !== parcel) {
+      hover = { parcel, start: now };
     }
   };
 
@@ -438,35 +500,31 @@ export function initCadastralBackground(): void {
    */
   const drawHover = (now: number): void => {
     if (!hover) return;
-    if (hover.col >= geometry.cols || hover.row >= geometry.rows) {
+    if (hover.parcel >= geometry.parcels.length) {
       hover = null;
       return;
     }
     const alpha = smoothstep((now - hover.start) / HOVER_ENTER_MS) * mouse.strength;
     if (alpha <= 0) return;
 
-    traceParcel(hover.col, hover.row);
+    traceParcel(hover.parcel);
     context.fillStyle = rgba(palette.parcelFill, alpha * (darkQuery.matches ? 0.16 : 0.14));
     context.fill();
     context.strokeStyle = rgba(palette.parcelStroke, alpha * (darkQuery.matches ? 0.6 : 0.7));
     context.lineWidth = 1.5;
     context.stroke();
 
+    const { vertices } = geometry.parcels[hover.parcel];
     context.fillStyle = rgba(palette.stake, alpha * 0.8);
-    for (const [dc, dr] of [
-      [0, 0],
-      [1, 0],
-      [1, 1],
-      [0, 1],
-    ] as const) {
+    for (let i = 0; i < vertices.length; i += 2) {
       context.beginPath();
-      context.arc(vertexX(hover.row + dr, hover.col + dc), vertexY(hover.row + dr, hover.col + dc), 2.5, 0, Math.PI * 2);
+      context.arc(vertices[i], vertices[i + 1], 2.5, 0, Math.PI * 2);
       context.fill();
     }
 
     const ringProgress = Math.min((now - hover.start) / HOVER_RING_MS, 1);
     if (ringProgress < 1) {
-      const [cx, cy] = parcelCentroid(hover.col, hover.row);
+      const { cx, cy } = geometry.parcels[hover.parcel];
       context.beginPath();
       context.arc(cx, cy, 4 + ringProgress * 22, 0, Math.PI * 2);
       context.strokeStyle = rgba(palette.ring, (1 - ringProgress) * alpha * 0.5);
@@ -763,14 +821,14 @@ export function initCadastralBackground(): void {
     context.clearRect(0, 0, geometry.width, geometry.height);
     drawGrid();
     drawStations();
-    for (const [col, row] of [
+    for (const [fx, fy] of [
       [0.25, 0.3],
       [0.72, 0.62],
       [0.5, 0.85],
     ] as const) {
-      const c = Math.floor(col * geometry.cols);
-      const r = Math.floor(row * geometry.rows);
-      traceParcel(c, r);
+      const parcel = parcelAt(fx * geometry.width, fy * geometry.height);
+      if (parcel < 0) continue;
+      traceParcel(parcel);
       context.fillStyle = rgba(palette.parcelFill, 0.1);
       context.fill();
       context.strokeStyle = rgba(palette.parcelStroke, 0.5);
@@ -814,12 +872,8 @@ export function initCadastralBackground(): void {
       drawStatic();
       return;
     }
-    // A few staggered pulses so the map feels alive on first paint.
-    pulses = [0, 1, 2].map((offset) => ({
-      col: Math.floor(hash(offset, 7) * geometry.cols),
-      row: Math.floor(hash(13, offset) * geometry.rows),
-      start: performance.now() - offset * 1200,
-    }));
+    // No pulses at load; the spawner brings the map to life after a pause.
+    pulses = [];
     nextSpawn = performance.now() + PULSE_SPAWN_BASE;
     frame = requestAnimationFrame(tick);
   };
