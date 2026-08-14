@@ -12,6 +12,7 @@
 
 <#macro
   registrationLayout
+  animatedBackground=false
   displayInfo=false
   displayMessage=true
   displayRequiredFields=false
@@ -69,7 +70,10 @@
       <@document.kw script=script />
     </head>
     <@body.kw>
-      <div class="flex min-h-[calc(100vh-3rem)] flex-col sm:min-h-[calc(100vh-5rem)]">
+      <#if animatedBackground>
+        <canvas aria-hidden="true" class="cadastral-background" id="kc-cadastral-background"></canvas>
+      </#if>
+      <div class="relative z-10 flex min-h-[calc(100vh-3rem)] flex-col sm:min-h-[calc(100vh-5rem)]">
         <div class="flex w-full flex-1 items-center justify-center">
           <@container.kw>
             <@card.kw content=cardContent footer=cardFooter header=cardHeader />

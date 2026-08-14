@@ -54,4 +54,11 @@
   .separate:not(:empty)::before {
     @apply mr-2;
   }
+
+  /* Animated cadastral background (Land Registration Office theme)
+    ======================================================================== */
+
+  .cadastral-background {
+    @apply pointer-events-none fixed inset-0 z-0 h-full w-full;
+  }
 }

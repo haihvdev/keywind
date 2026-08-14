@@ -1,6 +1,11 @@
 import Alpine from 'alpinejs';
 import { base64url } from 'rfc4648';
 
+// rfc4648 returns Uint8Array<ArrayBufferLike>, WebAuthn options require Uint8Array<ArrayBuffer>.
+function parseBase64url(value: string): Uint8Array<ArrayBuffer> {
+  return new Uint8Array(base64url.parse(value, { loose: true }));
+}
+
 type DataType = {
   $refs: RefsType;
   $store: StoreType;
@@ -91,7 +96,7 @@ document.addEventListener('alpine:init', () => {
 
       excludeCredentialIdsList.forEach((value) => {
         excludeCredentials.push({
-          id: base64url.parse(value, { loose: true }),
+          id: parseBase64url(value),
           type: 'public-key',
         });
       });
@@ -121,7 +126,7 @@ document.addEventListener('alpine:init', () => {
         }
 
         const publicKey: PublicKeyCredentialCreationOptions = {
-          challenge: base64url.parse(challenge, { loose: true }),
+          challenge: parseBase64url(challenge),
           pubKeyCredParams: getPubKeyCredParams(signatureAlgorithms),
           rp: {
             id: rpId,
@@ -129,7 +134,7 @@ document.addEventListener('alpine:init', () => {
           },
           user: {
             displayName: username,
-            id: base64url.parse(userId, { loose: true }),
+            id: parseBase64url(userId),
             name: username,
           },
         };
