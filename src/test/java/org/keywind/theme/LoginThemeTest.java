@@ -31,7 +31,7 @@ public class LoginThemeTest {
   private static final String LANGUAGE = "English";
   private static final String MESSAGE_PATH = "theme/base/login/messages/messages";
   private static final String OUTPUT_PATH = "html/login";
-  private static final String THEME_PATH = "theme/keywind/login";
+  private static final String THEME_PATH = "theme/haihv/login";
 
   @Test
   public void shouldTestTemplates() throws IOException, TemplateException {
