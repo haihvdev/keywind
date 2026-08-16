@@ -1,26 +1,31 @@
 /**
  * Animated cadastral (land-registry) background for the login page.
  *
- * Renders an HTML5 canvas that resembles a land parcel map: a Voronoi
- * mosaic of roughly 4-7-sided convex parcels, survey-station marks, and
- * parcels that light up one after another (like plots being registered).
- * Entity badges — database, person, organization, government, location,
- * document, ledger, signature, certificate — drift across the map: they
- * wander on their own and are gently attracted to the cursor, which also
- * casts a soft spotlight on the grid. Nearby entities are linked like a
- * network.
+ * Port từ Vbdlis-Tools tools-worker public/vbdlis/js/cadastral-background.js
+ * (Giai đoạn 2, 2026-08-15) — nền cũ (Voronoi parcels) được thay bằng:
+ *   1) Lưới kinh-vĩ tuyến toàn thế giới (orthographic, tâm Việt Nam).
+ *   2) Bản đồ 99 phường/xã tỉnh Bắc Ninh (mesh strokes, hover sáng tên xã).
+ * Các đối tượng khác (entities, links, spotlight, hover ring, pulses,
+ * reduced-motion, resize) giữ nguyên hành vi và thông số.
+ *
+ * Khác biệt so với bản tools-worker:
+ *   - Dark-mode dùng `prefers-color-scheme` media query (login theme không
+ *     kiểm soát theme bằng class).
+ *   - Selector canvas là #kc-cadastral-background.
+ *   - Bỏ zoom/pan/pinch, embed và logic header/footer (không dùng ở login);
+ *     bản đồ căn giữa viewport.
  *
  * The canvas is transparent, pointer-events: none, and drawn behind the
  * login card. It respects `prefers-reduced-motion` (renders a single
- * static frame) and `prefers-color-scheme` (light / dark palettes). The
- * grid pattern is re-randomized on every page load.
+ * static frame).
  */
+
+import { BACNINH_GEO } from './bacninhGeo';
 
 type RGB = [number, number, number];
 
 interface Palette {
   grid: RGB;
-  station: RGB;
   parcelFill: RGB;
   parcelStroke: RGB;
   stake: RGB;
@@ -30,17 +35,10 @@ interface Palette {
   spotlight: RGB;
 }
 
-interface Parcel {
-  /** Convex polygon vertices as [x0, y0, x1, y1, ...] in CSS pixels. */
-  vertices: number[];
-  cx: number;
-  cy: number;
-}
-
 interface Geometry {
   width: number;
   height: number;
-  parcels: Parcel[];
+  parcels: number[][];
 }
 
 interface Pulse {
@@ -66,20 +64,16 @@ interface Entity {
   y: number;
   vx: number;
   vy: number;
-  /** Current wander heading, radians. */
   wander: number;
   kind: EntityKind;
-  /** Icon half-size in CSS pixels. */
   size: number;
 }
 
 interface MouseState {
   x: number;
   y: number;
-  /** Smoothed position, follows the real pointer with a lag. */
   sx: number;
   sy: number;
-  /** 0..1; how strongly the cursor influences the scene. */
   strength: number;
   lastMove: number;
 }
@@ -91,7 +85,6 @@ interface HoverCell {
 
 const PALETTE_LIGHT: Palette = {
   grid: [13, 148, 136], // teal-600
-  station: [13, 148, 136],
   parcelFill: [16, 185, 129], // emerald-500
   parcelStroke: [4, 120, 87], // emerald-700
   stake: [4, 120, 87],
@@ -103,7 +96,6 @@ const PALETTE_LIGHT: Palette = {
 
 const PALETTE_DARK: Palette = {
   grid: [94, 234, 212], // teal-300
-  station: [94, 234, 212],
   parcelFill: [52, 211, 153], // emerald-400
   parcelStroke: [52, 211, 153],
   stake: [110, 231, 183], // emerald-300
@@ -113,13 +105,15 @@ const PALETTE_DARK: Palette = {
   spotlight: [45, 212, 191], // teal-400
 };
 
-const CELL_TARGET = 176; // approximate parcel size in CSS pixels
-const SEED_JITTER = 0.42; // seed displacement as a fraction of cell size
-const RELAX_STEPS = 1; // Lloyd relaxation passes to even out parcel sizes
+// --- Lưới kinh-vĩ tuyến ---
+const GRATICULE_STEP = 15; // độ
+
+// --- Pulse ---
 const PULSE_LIFETIME = 4600;
 const PULSE_SPAWN_BASE = 900;
 const PULSE_MAX = 8;
 
+// --- Entity / interaction ---
 const ENTITY_COUNT = 14;
 const ENTITY_SPEED = 26; // px/s
 const WANDER_FORCE = 18;
@@ -149,18 +143,10 @@ const STATIC_ENTITIES: ReadonlyArray<readonly [number, number, EntityKind]> = [
   [0.7, 0.75, 'certificate'],
 ];
 
-/** Seed for the grid jitter; re-randomized on each page load. */
-let gridSeed = Math.random() * 1e6;
-
 /** Deterministic pseudo-random in [0, 1) from two integer coordinates. */
 function hash(x: number, y: number): number {
   const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
   return n - Math.floor(n);
-}
-
-/** Grid-dependent hash: same input coordinates, different pattern per seed. */
-function seededHash(x: number, y: number): number {
-  return hash(x + gridSeed * 13.37, y + gridSeed * 7.77);
 }
 
 function smoothstep(t: number): number {
@@ -172,98 +158,80 @@ function rgba([r, g, b]: RGB, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-/** Clip a convex polygon (x,y pairs) to the half-plane closer to p than to q. */
-function clipByBisector(poly: number[], px: number, py: number, qx: number, qy: number): number[] {
-  const mx = (px + qx) / 2;
-  const my = (py + qy) / 2;
-  const dx = qx - px;
-  const dy = qy - py;
-  const out: number[] = [];
-  const count = poly.length / 2;
-  for (let i = 0; i < count; i++) {
-    const j = (i + 1) % count;
-    const ax = poly[i * 2];
-    const ay = poly[i * 2 + 1];
-    const bx = poly[j * 2];
-    const by = poly[j * 2 + 1];
-    const sa = (ax - mx) * dx + (ay - my) * dy;
-    const sb = (bx - mx) * dx + (by - my) * dy;
-    if (sa <= 0) out.push(ax, ay);
-    if ((sa < 0 && sb > 0) || (sa > 0 && sb < 0)) {
-      const t = sa / (sa - sb);
-      out.push(ax + (bx - ax) * t, ay + (by - ay) * t);
-    }
-  }
-  return out;
-}
+// ================================================================
+// Lưới kinh-vĩ tuyến (orthographic, tâm Việt Nam)
+// ================================================================
 
-/** Voronoi cell of seeds[idx] (flat x,y pairs) clipped to the viewport. */
-function voronoiCell(seeds: number[], idx: number, width: number, height: number): number[] {
-  let poly = [0, 0, width, 0, width, height, 0, height];
-  const px = seeds[idx * 2];
-  const py = seeds[idx * 2 + 1];
-  for (let k = 0; k < seeds.length / 2; k++) {
-    if (k === idx) continue;
-    poly = clipByBisector(poly, px, py, seeds[k * 2], seeds[k * 2 + 1]);
-    if (poly.length < 6) break;
-  }
-  return poly;
-}
-
-function polygonCentroid(poly: number[]): [number, number] {
-  let sx = 0;
-  let sy = 0;
-  const count = poly.length / 2;
-  for (let i = 0; i < count; i++) {
-    sx += poly[i * 2];
-    sy += poly[i * 2 + 1];
-  }
-  return [sx / count, sy / count];
-}
+const GRATICULE_LON0 = 105.8;
+const GRATICULE_LAT0 = 21.3;
+const GRATICULE_LON0_RAD = (GRATICULE_LON0 * Math.PI) / 180;
+const GRATICULE_LAT0_RAD = (GRATICULE_LAT0 * Math.PI) / 180;
+const GRATICULE_SIN_PHI0 = Math.sin(GRATICULE_LAT0_RAD);
+const GRATICULE_COS_PHI0 = Math.cos(GRATICULE_LAT0_RAD);
 
 /**
- * Cadastral tessellation: Voronoi cells of a jittered point lattice. Cells
- * come out as convex polygons with roughly 4-7 sides — like real land
- * parcels — instead of a uniform quad grid.
+ * Orthographic projection: geographic (lon, lat in degrees) to screen (x, y).
+ * Returns null if the point is on the far side of the globe (not visible).
  */
-function buildGeometry(width: number, height: number): Geometry {
-  const cols = Math.max(3, Math.ceil(width / CELL_TARGET));
-  const rows = Math.max(3, Math.ceil(height / CELL_TARGET));
-  const cellW = width / cols;
-  const cellH = height / rows;
+function orthoProject(
+  lonDeg: number,
+  latDeg: number,
+  cx: number,
+  cy: number,
+  R: number
+): [number, number] | null {
+  const lambda = (lonDeg * Math.PI) / 180;
+  const phi = (latDeg * Math.PI) / 180;
+  const cosPhi = Math.cos(phi);
+  const sinPhi = Math.sin(phi);
+  const dl = lambda - GRATICULE_LON0_RAD;
+  const cosDl = Math.cos(dl);
+  const sinDl = Math.sin(dl);
+  // Visibility check: dot product with view direction
+  const vis = GRATICULE_SIN_PHI0 * sinPhi + GRATICULE_COS_PHI0 * cosPhi * cosDl;
+  if (vis < 0) return null;
+  const x = cx + R * cosPhi * sinDl;
+  const y = cy - R * (GRATICULE_COS_PHI0 * sinPhi - GRATICULE_SIN_PHI0 * cosPhi * cosDl);
+  return [x, y];
+}
 
-  // Seeds span one extra ring outside the viewport so border cells clip well.
-  let seeds: number[] = [];
-  for (let row = 0; row < rows + 2; row++) {
-    for (let col = 0; col < cols + 2; col++) {
-      const jx = (seededHash(row, col) - 0.5) * 2 * SEED_JITTER * cellW;
-      const jy = (seededHash(row + 57, col + 91) - 0.5) * 2 * SEED_JITTER * cellH;
-      seeds.push((col - 1) * cellW + cellW / 2 + jx, (row - 1) * cellH + cellH / 2 + jy);
+// ================================================================
+// Bản đồ Bắc Ninh (equirectangular, căn giữa viewport)
+// ================================================================
+
+interface BacNinhProjection {
+  parcels: number[][];
+  cx: number;
+  cy: number;
+}
+
+/** Chiếu equirectangular fit-width cho 99 polygon phường/xã Bắc Ninh. */
+function projectBacNinh(width: number, height: number): BacNinhProjection | null {
+  const rings = BACNINH_GEO.communes;
+  if (!rings.length) return null;
+
+  const [minLon, minLat, maxLon, maxLat] = BACNINH_GEO.bbox;
+  const midLon = (minLon + maxLon) / 2;
+  const midLat = (minLat + maxLat) / 2;
+  const cosMid = Math.cos((midLat * Math.PI) / 180);
+
+  let k0 = width / ((maxLon - minLon) * cosMid);
+  if (k0 * (maxLat - minLat) > 0.8 * height) {
+    k0 = (0.8 * height) / (maxLat - minLat);
+  }
+
+  const cx = width / 2;
+  const cy = height / 2;
+
+  const parcels: number[][] = [];
+  for (const ring of rings) {
+    const flat: number[] = [];
+    for (const [lon, lat] of ring) {
+      flat.push(cx + (lon - midLon) * cosMid * k0, cy - (lat - midLat) * k0);
     }
+    parcels.push(flat);
   }
-
-  // Lloyd relaxation: move each seed to its cell centroid so parcels stay
-  // even-sized and slivers are rare.
-  for (let step = 0; step < RELAX_STEPS; step++) {
-    const relaxed: number[] = new Array(seeds.length);
-    for (let i = 0; i < seeds.length / 2; i++) {
-      const cell = voronoiCell(seeds, i, width, height);
-      const [cx, cy] = polygonCentroid(cell.length >= 6 ? cell : [seeds[i * 2], seeds[i * 2 + 1]]);
-      relaxed[i * 2] = cx;
-      relaxed[i * 2 + 1] = cy;
-    }
-    seeds = relaxed;
-  }
-
-  const parcels: Parcel[] = [];
-  for (let i = 0; i < seeds.length / 2; i++) {
-    const vertices = voronoiCell(seeds, i, width, height);
-    if (vertices.length < 6) continue; // degenerate, fully clipped away
-    const [cx, cy] = polygonCentroid(vertices);
-    parcels.push({ vertices, cx, cy });
-  }
-
-  return { width, height, parcels };
+  return { parcels, cx, cy };
 }
 
 function spawnEntities(geometry: Geometry): Entity[] {
@@ -292,9 +260,17 @@ export function initCadastralBackground(): void {
 
   const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
   const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const isDark = (): boolean => darkQuery.matches;
 
-  let palette = darkQuery.matches ? PALETTE_DARK : PALETTE_LIGHT;
-  let geometry = buildGeometry(window.innerWidth, window.innerHeight);
+  let palette = isDark() ? PALETTE_DARK : PALETTE_LIGHT;
+  let geometry: Geometry = {
+    width: window.innerWidth,
+    height: window.innerHeight,
+    parcels: [],
+  };
+
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+
   let pulses: Pulse[] = [];
   let entities: Entity[] = [];
   let hover: HoverCell | null = null;
@@ -310,15 +286,27 @@ export function initCadastralBackground(): void {
     lastMove: -Infinity,
   };
 
+  // ================================================================
+  // Resize
+  // ================================================================
+
+  const reproject = (): void => {
+    const bacninh = projectBacNinh(geometry.width, geometry.height);
+    geometry.parcels = bacninh ? bacninh.parcels : [];
+    pulses = pulses.filter((p) => p.parcel < geometry.parcels.length);
+  };
+
   const resize = (): void => {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
     const width = window.innerWidth;
     const height = window.innerHeight;
     canvas.width = Math.round(width * dpr);
     canvas.height = Math.round(height * dpr);
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    geometry = buildGeometry(width, height);
-    pulses = pulses.filter(({ parcel }) => parcel < geometry.parcels.length);
+
+    geometry.width = width;
+    geometry.height = height;
+    reproject();
     for (const entity of entities) {
       entity.x = Math.min(Math.max(entity.x, BOUND_MARGIN), geometry.width - BOUND_MARGIN);
       entity.y = Math.min(Math.max(entity.y, BOUND_MARGIN), geometry.height - BOUND_MARGIN);
@@ -328,8 +316,12 @@ export function initCadastralBackground(): void {
     }
   };
 
+  // ================================================================
+  // Trace polygon — flat vertex array [x1,y1,x2,y2,...]
+  // ================================================================
+
   const traceParcel = (index: number): void => {
-    const { vertices } = geometry.parcels[index];
+    const vertices = geometry.parcels[index];
     context.beginPath();
     context.moveTo(vertices[0], vertices[1]);
     for (let i = 2; i < vertices.length; i += 2) {
@@ -338,24 +330,21 @@ export function initCadastralBackground(): void {
     context.closePath();
   };
 
-  /** Point-in-polygon test for a convex parcel (all same-sign cross products). */
+  /** Point-in-polygon test (ray casting — works for any simple polygon). */
   const pointInParcel = (index: number, x: number, y: number): boolean => {
-    const { vertices } = geometry.parcels[index];
+    const vertices = geometry.parcels[index];
     const count = vertices.length / 2;
-    let sign = 0;
-    for (let i = 0; i < count; i++) {
-      const j = (i + 1) % count;
-      const ax = vertices[i * 2];
-      const ay = vertices[i * 2 + 1];
-      const bx = vertices[j * 2];
-      const by = vertices[j * 2 + 1];
-      const cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax);
-      if (cross === 0) continue;
-      const crossSign = Math.sign(cross);
-      if (sign === 0) sign = crossSign;
-      else if (crossSign !== sign) return false;
+    let inside = false;
+    for (let i = 0, j = count - 1; i < count; j = i++) {
+      const xi = vertices[i * 2];
+      const yi = vertices[i * 2 + 1];
+      const xj = vertices[j * 2];
+      const yj = vertices[j * 2 + 1];
+      if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+        inside = !inside;
+      }
     }
-    return true;
+    return inside;
   };
 
   const parcelAt = (x: number, y: number): number => {
@@ -365,44 +354,86 @@ export function initCadastralBackground(): void {
     return -1;
   };
 
-  const drawGrid = (): void => {
+  // ================================================================
+  // Graticule — lưới kinh-vĩ tuyến orthographic tâm Việt Nam
+  // ================================================================
+
+  const drawGraticule = (): void => {
+    const cx = geometry.width / 2;
+    const cy = geometry.height / 2;
+    // Ưu tiên hiện rõ lưới kinh-vĩ tuyến toàn màn, không cần thấy trọn viền cầu
+    const R = 0.9 * Math.max(geometry.width, geometry.height);
+    const step = GRATICULE_STEP;
+
+    // Đĩa cầu rất nhẹ
+    context.fillStyle = rgba(palette.grid, 0.03);
     context.beginPath();
-    for (const parcel of geometry.parcels) {
-      const { vertices } = parcel;
-      context.moveTo(vertices[0], vertices[1]);
-      for (let i = 2; i < vertices.length; i += 2) {
-        context.lineTo(vertices[i], vertices[i + 1]);
-      }
-      context.closePath();
-    }
-    context.strokeStyle = rgba(palette.grid, darkQuery.matches ? 0.1 : 0.13);
+    context.arc(cx, cy, R, 0, Math.PI * 2);
+    context.fill();
+    context.strokeStyle = rgba(palette.grid, isDark() ? 0.1 : 0.13);
     context.lineWidth = 1;
     context.stroke();
-  };
 
-  /** Small "+" marks on some parcel vertices, like survey stations on a map. */
-  const drawStations = (): void => {
-    context.strokeStyle = rgba(palette.station, darkQuery.matches ? 0.22 : 0.3);
+    // Kinh tuyến (meridian): λ = λ0 + k*step
     context.lineWidth = 1;
-    context.beginPath();
-    const seen = new Set<number>();
-    for (const parcel of geometry.parcels) {
-      for (let i = 0; i < parcel.vertices.length; i += 2) {
-        const x = Math.round(parcel.vertices[i]);
-        const y = Math.round(parcel.vertices[i + 1]);
-        const key = x * 100000 + y;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        if (seededHash(x, y) < 0.12) {
-          context.moveTo(x - 4, y);
-          context.lineTo(x + 4, y);
-          context.moveTo(x, y - 4);
-          context.lineTo(x, y + 4);
+    context.strokeStyle = rgba(palette.grid, isDark() ? 0.16 : 0.2);
+    for (let km = -Math.floor(180 / step); km <= Math.floor(180 / step); km++) {
+      if (km === 0) continue; // bỏ trùng λ0
+      const lon = GRATICULE_LON0 + km * step;
+      context.beginPath();
+      let started = false;
+      for (let phi = -88; phi <= 88; phi += 2) {
+        const pt = orthoProject(lon, phi, cx, cy, R);
+        if (pt) {
+          if (!started) {
+            context.moveTo(pt[0], pt[1]);
+            started = true;
+          } else context.lineTo(pt[0], pt[1]);
+        } else {
+          started = false;
         }
       }
+      context.stroke();
     }
-    context.stroke();
+
+    // Vĩ tuyến (parallel): φ = k*step
+    for (let kp = -Math.floor(90 / step); kp <= Math.floor(90 / step); kp++) {
+      const lat = kp * step;
+      context.beginPath();
+      let started = false;
+      for (let lambda = GRATICULE_LON0 - 180; lambda <= GRATICULE_LON0 + 180; lambda += 2) {
+        const pt = orthoProject(lambda, lat, cx, cy, R);
+        if (pt) {
+          if (!started) {
+            context.moveTo(pt[0], pt[1]);
+            started = true;
+          } else context.lineTo(pt[0], pt[1]);
+        } else {
+          started = false;
+        }
+      }
+      context.stroke();
+    }
   };
+
+  // ================================================================
+  // Mesh xã — stroke từng polygon phường/xã
+  // ================================================================
+
+  const drawCommuneMesh = (): void => {
+    if (!geometry.parcels.length) return;
+    // Ranh giới xã đậm hơn lưới cầu 1 chút để không bị lưới làm mờ ở viền màn
+    context.strokeStyle = rgba(palette.grid, isDark() ? 0.18 : 0.22);
+    context.lineWidth = 1.2;
+    for (let i = 0; i < geometry.parcels.length; i++) {
+      traceParcel(i);
+      context.stroke();
+    }
+  };
+
+  // ================================================================
+  // Pulse — parcel = polygon xã
+  // ================================================================
 
   const pulseAlpha = (pulse: Pulse, now: number): number => {
     const progress = (now - pulse.start) / PULSE_LIFETIME;
@@ -430,15 +461,14 @@ export function initCadastralBackground(): void {
       if (alpha <= 0) continue;
 
       traceParcel(pulse.parcel);
-      context.fillStyle = rgba(palette.parcelFill, alpha * (darkQuery.matches ? 0.12 : 0.1));
+      context.fillStyle = rgba(palette.parcelFill, alpha * (isDark() ? 0.12 : 0.1));
       context.fill();
-
-      context.strokeStyle = rgba(palette.parcelStroke, alpha * (darkQuery.matches ? 0.5 : 0.55));
+      context.strokeStyle = rgba(palette.parcelStroke, alpha * (isDark() ? 0.5 : 0.55));
       context.lineWidth = 1.5;
       context.stroke();
 
-      // Corner stakes at every parcel vertex
-      const { vertices } = geometry.parcels[pulse.parcel];
+      // Corner stakes ở mọi đỉnh polygon
+      const vertices = geometry.parcels[pulse.parcel];
       context.fillStyle = rgba(palette.stake, alpha * 0.75);
       for (let i = 0; i < vertices.length; i += 2) {
         context.beginPath();
@@ -446,13 +476,12 @@ export function initCadastralBackground(): void {
         context.fill();
       }
 
-      // Expanding ring at the centroid, like a marker being dropped
+      // Ring mở rộng tại tâm chuột
       const progress = (now - pulse.start) / PULSE_LIFETIME;
       if (progress < 0.4) {
-        const { cx, cy } = geometry.parcels[pulse.parcel];
         const ringProgress = progress / 0.4;
         context.beginPath();
-        context.arc(cx, cy, 4 + ringProgress * 22, 0, Math.PI * 2);
+        context.arc(mouse.sx, mouse.sy, 4 + ringProgress * 22, 0, Math.PI * 2);
         context.strokeStyle = rgba(palette.ring, (1 - ringProgress) * alpha * 0.5);
         context.lineWidth = 1.5;
         context.stroke();
@@ -460,14 +489,29 @@ export function initCadastralBackground(): void {
     }
   };
 
-  /** Soft radial highlight that follows the cursor across the grid. */
+  // ================================================================
+  // Spotlight, mouse, hover
+  // ================================================================
+
   const drawSpotlight = (): void => {
     if (mouse.strength <= 0.01) return;
-    const gradient = context.createRadialGradient(mouse.sx, mouse.sy, 0, mouse.sx, mouse.sy, SPOTLIGHT_RADIUS);
-    gradient.addColorStop(0, rgba(palette.spotlight, mouse.strength * (darkQuery.matches ? 0.09 : 0.1)));
+    const gradient = context.createRadialGradient(
+      mouse.sx,
+      mouse.sy,
+      0,
+      mouse.sx,
+      mouse.sy,
+      SPOTLIGHT_RADIUS
+    );
+    gradient.addColorStop(0, rgba(palette.spotlight, mouse.strength * (isDark() ? 0.09 : 0.1)));
     gradient.addColorStop(1, rgba(palette.spotlight, 0));
     context.fillStyle = gradient;
-    context.fillRect(mouse.sx - SPOTLIGHT_RADIUS, mouse.sy - SPOTLIGHT_RADIUS, SPOTLIGHT_RADIUS * 2, SPOTLIGHT_RADIUS * 2);
+    context.fillRect(
+      mouse.sx - SPOTLIGHT_RADIUS,
+      mouse.sy - SPOTLIGHT_RADIUS,
+      SPOTLIGHT_RADIUS * 2,
+      SPOTLIGHT_RADIUS * 2
+    );
   };
 
   const updateMouse = (now: number, dt: number): void => {
@@ -478,7 +522,7 @@ export function initCadastralBackground(): void {
     mouse.sy += (mouse.y - mouse.sy) * follow;
   };
 
-  /** Track which parcel the pointer is over; resets the enter animation on change. */
+  /** Track which commune the pointer is over; resets the enter animation on change. */
   const updateHover = (now: number): void => {
     if (mouse.strength <= 0.01) {
       hover = null;
@@ -495,8 +539,8 @@ export function initCadastralBackground(): void {
   };
 
   /**
-   * The parcel under the cursor lights up like a plot at the moment of
-   * registration: fill, boundary, corner stakes, and an expanding ring.
+   * The commune under the cursor lights up: fill, boundary, corner stakes,
+   * an expanding ring at the cursor position, and its name.
    */
   const drawHover = (now: number): void => {
     if (!hover) return;
@@ -508,13 +552,13 @@ export function initCadastralBackground(): void {
     if (alpha <= 0) return;
 
     traceParcel(hover.parcel);
-    context.fillStyle = rgba(palette.parcelFill, alpha * (darkQuery.matches ? 0.16 : 0.14));
+    context.fillStyle = rgba(palette.parcelFill, alpha * (isDark() ? 0.16 : 0.14));
     context.fill();
-    context.strokeStyle = rgba(palette.parcelStroke, alpha * (darkQuery.matches ? 0.6 : 0.7));
+    context.strokeStyle = rgba(palette.parcelStroke, alpha * (isDark() ? 0.6 : 0.7));
     context.lineWidth = 1.5;
     context.stroke();
 
-    const { vertices } = geometry.parcels[hover.parcel];
+    const vertices = geometry.parcels[hover.parcel];
     context.fillStyle = rgba(palette.stake, alpha * 0.8);
     for (let i = 0; i < vertices.length; i += 2) {
       context.beginPath();
@@ -524,14 +568,41 @@ export function initCadastralBackground(): void {
 
     const ringProgress = Math.min((now - hover.start) / HOVER_RING_MS, 1);
     if (ringProgress < 1) {
-      const { cx, cy } = geometry.parcels[hover.parcel];
       context.beginPath();
-      context.arc(cx, cy, 4 + ringProgress * 22, 0, Math.PI * 2);
+      context.arc(mouse.sx, mouse.sy, 4 + ringProgress * 22, 0, Math.PI * 2);
       context.strokeStyle = rgba(palette.ring, (1 - ringProgress) * alpha * 0.5);
       context.lineWidth = 1.5;
       context.stroke();
     }
+
+    // Hiển thị tên xã khi hover
+    const communeName = BACNINH_GEO.names[hover.parcel];
+    if (communeName) {
+      context.font = '600 12px system-ui, -apple-system, "Segoe UI", sans-serif';
+      const textWidth = context.measureText(communeName).width;
+      let tx = mouse.x + 14;
+      let ty = mouse.y - 14;
+      // Lật sang trái chuột nếu tràn mép phải viewport
+      if (tx + textWidth > geometry.width) {
+        tx = mouse.x - 14 - textWidth;
+      }
+      // Vẽ dưới chuột nếu y quá gần mép trên
+      if (ty < 20) {
+        ty = mouse.y + 20;
+      }
+      // Halo strokeText tương phản
+      context.lineJoin = 'round';
+      context.lineWidth = 3;
+      context.strokeStyle = isDark() ? 'rgba(2,6,23,0.75)' : 'rgba(255,255,255,0.75)';
+      context.strokeText(communeName, tx, ty);
+      context.fillStyle = rgba(palette.parcelStroke, 0.95);
+      context.fillText(communeName, tx, ty);
+    }
   };
+
+  // ================================================================
+  // Entities
+  // ================================================================
 
   const updateEntities = (dt: number): void => {
     for (const entity of entities) {
@@ -553,9 +624,11 @@ export function initCadastralBackground(): void {
 
       // Steer back toward the visible area
       if (entity.x < BOUND_MARGIN) ax += BOUND_FORCE * (1 - entity.x / BOUND_MARGIN);
-      if (entity.x > geometry.width - BOUND_MARGIN) ax -= BOUND_FORCE * (1 - (geometry.width - entity.x) / BOUND_MARGIN);
+      if (entity.x > geometry.width - BOUND_MARGIN)
+        ax -= BOUND_FORCE * (1 - (geometry.width - entity.x) / BOUND_MARGIN);
       if (entity.y < BOUND_MARGIN) ay += BOUND_FORCE * (1 - entity.y / BOUND_MARGIN);
-      if (entity.y > geometry.height - BOUND_MARGIN) ay -= BOUND_FORCE * (1 - (geometry.height - entity.y) / BOUND_MARGIN);
+      if (entity.y > geometry.height - BOUND_MARGIN)
+        ay -= BOUND_FORCE * (1 - (geometry.height - entity.y) / BOUND_MARGIN);
 
       entity.vx += ax * dt;
       entity.vy += ay * dt;
@@ -589,8 +662,12 @@ export function initCadastralBackground(): void {
     }
   };
 
+  // ================================================================
+  // Entity icons
+  // ================================================================
+
   const drawEntityIcon = (kind: EntityKind, cx: number, cy: number, s: number): void => {
-    const iconAlpha = darkQuery.matches ? 0.9 : 0.8;
+    const iconAlpha = isDark() ? 0.9 : 0.8;
     context.lineCap = 'round';
     context.lineJoin = 'round';
     context.lineWidth = 1.5;
@@ -598,9 +675,9 @@ export function initCadastralBackground(): void {
     // Badge disc so the icon stays legible over the grid
     context.beginPath();
     context.arc(cx, cy, s * 1.45, 0, Math.PI * 2);
-    context.fillStyle = rgba(palette.entity, darkQuery.matches ? 0.08 : 0.07);
+    context.fillStyle = rgba(palette.entity, isDark() ? 0.08 : 0.07);
     context.fill();
-    context.strokeStyle = rgba(palette.entity, darkQuery.matches ? 0.35 : 0.3);
+    context.strokeStyle = rgba(palette.entity, isDark() ? 0.35 : 0.3);
     context.lineWidth = 1;
     context.stroke();
 
@@ -643,12 +720,13 @@ export function initCadastralBackground(): void {
       case 'organization': {
         const w = s * 0.52;
         context.strokeRect(cx - w, cy - s * 0.62, w * 2, s * 1.24);
-        for (const [ox, oy] of [
+        const offsets = [
           [-0.24, -0.32],
           [0.24, -0.32],
           [-0.24, 0.08],
           [0.24, 0.08],
-        ] as const) {
+        ];
+        for (const [ox, oy] of offsets) {
           context.fillRect(cx + ox * s - s * 0.09, cy + oy * s - s * 0.09, s * 0.18, s * 0.18);
         }
         break;
@@ -666,9 +744,9 @@ export function initCadastralBackground(): void {
         context.lineTo(cx + s * 0.6, lintelY);
         context.stroke();
         context.beginPath();
-        for (const ox of [-0.42, -0.14, 0.14, 0.42]) {
-          context.moveTo(cx + ox * s, lintelY);
-          context.lineTo(cx + ox * s, baseY);
+        for (const off of [-0.42, -0.14, 0.14, 0.42]) {
+          context.moveTo(cx + off * s, lintelY);
+          context.lineTo(cx + off * s, baseY);
         }
         context.stroke();
         break;
@@ -702,9 +780,9 @@ export function initCadastralBackground(): void {
         context.moveTo(cx + s * 0.18, cy - s * 0.62);
         context.lineTo(cx + s * 0.18, cy - s * 0.3);
         context.lineTo(cx + s * 0.5, cy - s * 0.3);
-        for (const oy of [-0.02, 0.22, 0.46] as const) {
-          context.moveTo(cx - s * 0.24, cy + oy * s);
-          context.lineTo(cx + s * 0.3, cy + oy * s);
+        for (const dy of [-0.02, 0.22, 0.46]) {
+          context.moveTo(cx - s * 0.24, cy + dy * s);
+          context.lineTo(cx + s * 0.3, cy + dy * s);
         }
         context.stroke();
         break;
@@ -715,9 +793,9 @@ export function initCadastralBackground(): void {
         context.beginPath();
         context.moveTo(cx - s * 0.28, cy - s * 0.6);
         context.lineTo(cx - s * 0.28, cy + s * 0.6);
-        for (const oy of [-0.15, 0.2] as const) {
-          context.moveTo(cx - s * 0.14, cy + oy * s);
-          context.lineTo(cx + s * 0.36, cy + oy * s);
+        for (const dy of [-0.15, 0.2]) {
+          context.moveTo(cx - s * 0.14, cy + dy * s);
+          context.lineTo(cx + s * 0.36, cy + dy * s);
         }
         context.stroke();
         break;
@@ -726,8 +804,22 @@ export function initCadastralBackground(): void {
         // Handwritten squiggle over a signing line
         context.beginPath();
         context.moveTo(cx - s * 0.55, cy + s * 0.3);
-        context.bezierCurveTo(cx - s * 0.3, cy - s * 0.15, cx - s * 0.15, cy + s * 0.5, cx + s * 0.05, cy + s * 0.05);
-        context.bezierCurveTo(cx + s * 0.2, cy - s * 0.25, cx + s * 0.4, cy + s * 0.2, cx + s * 0.55, cy - s * 0.1);
+        context.bezierCurveTo(
+          cx - s * 0.3,
+          cy - s * 0.15,
+          cx - s * 0.15,
+          cy + s * 0.5,
+          cx + s * 0.05,
+          cy + s * 0.05
+        );
+        context.bezierCurveTo(
+          cx + s * 0.2,
+          cy - s * 0.25,
+          cx + s * 0.4,
+          cy + s * 0.2,
+          cx + s * 0.55,
+          cy - s * 0.1
+        );
         context.stroke();
         context.beginPath();
         context.moveTo(cx - s * 0.5, cy + s * 0.6);
@@ -761,7 +853,7 @@ export function initCadastralBackground(): void {
   };
 
   const drawEntityLinks = (): void => {
-    const baseAlpha = darkQuery.matches ? 0.4 : 0.42;
+    const baseAlpha = isDark() ? 0.4 : 0.42;
     context.lineWidth = 1;
     for (let i = 0; i < entities.length; i++) {
       for (let j = i + 1; j < entities.length; j++) {
@@ -799,14 +891,19 @@ export function initCadastralBackground(): void {
     }
   };
 
+  // ================================================================
+  // Main draw frame — thứ tự lớp: graticule → mesh →
+  //   spotlight → hover → pulses → entities
+  // ================================================================
+
   const drawFrame = (now: number): void => {
     const dt = lastNow === 0 ? 0 : Math.min((now - lastNow) / 1000, 0.05);
     lastNow = now;
 
     context.clearRect(0, 0, geometry.width, geometry.height);
     updateMouse(now, dt);
-    drawGrid();
-    drawStations();
+    drawGraticule(); // Lớp dưới: lưới kinh-vĩ tuyến thế giới
+    drawCommuneMesh(); // Mesh xã
     drawSpotlight();
     updateHover(now);
     drawHover(now);
@@ -819,16 +916,15 @@ export function initCadastralBackground(): void {
   /** Single still frame for users who prefer reduced motion. */
   const drawStatic = (): void => {
     context.clearRect(0, 0, geometry.width, geometry.height);
-    drawGrid();
-    drawStations();
-    for (const [fx, fy] of [
-      [0.25, 0.3],
-      [0.72, 0.62],
-      [0.5, 0.85],
-    ] as const) {
-      const parcel = parcelAt(fx * geometry.width, fy * geometry.height);
-      if (parcel < 0) continue;
-      traceParcel(parcel);
+
+    // Lớp nền: graticule + mesh
+    drawGraticule();
+    drawCommuneMesh();
+
+    // Sáng cố định 3 polygon xã
+    for (const idx of [0, 49, 98]) {
+      if (idx >= geometry.parcels.length) continue;
+      traceParcel(idx);
       context.fillStyle = rgba(palette.parcelFill, 0.1);
       context.fill();
       context.strokeStyle = rgba(palette.parcelStroke, 0.5);
@@ -836,6 +932,7 @@ export function initCadastralBackground(): void {
       context.stroke();
     }
 
+    // STATIC_ENTITIES + links
     const placed = STATIC_ENTITIES.map(([fx, fy, kind]) => ({
       x: fx * geometry.width,
       y: fy * geometry.height,
@@ -847,15 +944,15 @@ export function initCadastralBackground(): void {
       for (let j = i + 1; j < placed.length; j++) {
         const dist = Math.hypot(placed[j].x - placed[i].x, placed[j].y - placed[i].y);
         if (dist >= LINK_DIST) continue;
-        context.strokeStyle = rgba(palette.link, (1 - dist / LINK_DIST) * (darkQuery.matches ? 0.4 : 0.42));
+        context.strokeStyle = rgba(palette.link, (1 - dist / LINK_DIST) * (isDark() ? 0.4 : 0.42));
         context.beginPath();
         context.moveTo(placed[i].x, placed[i].y);
         context.lineTo(placed[j].x, placed[j].y);
         context.stroke();
       }
     }
-    for (const entity of placed) {
-      drawEntityIcon(entity.kind, entity.x, entity.y, entity.size);
+    for (const p of placed) {
+      drawEntityIcon(p.kind, p.x, p.y, p.size);
     }
   };
 
@@ -889,7 +986,7 @@ export function initCadastralBackground(): void {
   };
 
   const onSchemeChange = (): void => {
-    palette = darkQuery.matches ? PALETTE_DARK : PALETTE_LIGHT;
+    palette = isDark() ? PALETTE_DARK : PALETTE_LIGHT;
     if (reducedMotionQuery.matches) drawStatic();
   };
 
