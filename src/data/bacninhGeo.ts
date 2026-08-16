@@ -21,6 +21,7 @@ export interface BacNinhGeo {
  * Dữ liệu bản đồ 99 phường/xã tỉnh Bắc Ninh (mã tỉnh 24).
  * Nguồn: api-vnlis.mae.gov.vn (DVHC Communes geojson), tolerance 0.001 độ.
  * Port từ Vbdlis-Tools tools-worker public/vbdlis/js/bacninh-geo.js (2026-08-15).
+ * CRS: GeoJSON mặc định WGS84 (EPSG:4326) — mỗi điểm [longitude, latitude] độ.
  */
 export const BACNINH_GEO: BacNinhGeo = {
   communes: [

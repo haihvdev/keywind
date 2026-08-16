@@ -73,8 +73,8 @@
       <#if animatedBackground>
         <canvas aria-hidden="true" class="cadastral-background" id="kc-cadastral-background"></canvas>
       </#if>
-      <div class="relative z-10 flex min-h-[calc(100vh-3rem)] flex-col sm:min-h-[calc(100vh-5rem)]">
-        <div class="flex w-full flex-1 items-center justify-center">
+      <div class="pointer-events-none relative z-10 flex min-h-[calc(100vh-3rem)] flex-col sm:min-h-[calc(100vh-5rem)]">
+        <div class="flex w-full flex-1 items-center justify-center pointer-events-none">
           <@container.kw>
             <@card.kw content=cardContent footer=cardFooter header=cardHeader />
             <@nav.kw>
@@ -85,7 +85,7 @@
             </@nav.kw>
           </@container.kw>
         </div>
-        <div class="pb-1 text-center text-sm text-slate-500 dark:text-slate-400">
+        <div class="pointer-events-auto pb-1 text-center text-sm text-slate-500 dark:text-slate-400">
           &copy; ${.now?string("yyyy")} vpdkbacninh.vn | haihv.vn
         </div>
       </div>

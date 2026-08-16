@@ -12,8 +12,9 @@
  *   - Dark-mode dùng `prefers-color-scheme` media query (login theme không
  *     kiểm soát theme bằng class).
  *   - Selector canvas là #kc-cadastral-background.
- *   - Bỏ zoom/pan/pinch, embed và logic header/footer (không dùng ở login);
- *     bản đồ căn giữa viewport.
+ *   - Pan bằng kéo chuột (xoay tâm orthographic); double-click reset.
+ *   - GeoJSON VNLIS: tọa độ WGS84 (EPSG:4326), lon/lat độ — mesh xã chiếu
+ *     orthographic cùng R/tâm với lưới kinh-vĩ để độ cong khớp khi pan.
  *
  * The canvas is transparent, pointer-events: none, and drawn behind the
  * login card. It respects `prefers-reduced-motion` (renders a single
@@ -106,7 +107,39 @@ const PALETTE_DARK: Palette = {
 };
 
 // --- Lưới kinh-vĩ tuyến ---
-const GRATICULE_STEP = 15; // độ
+/** Bước lưới mặc định (toàn cầu); khi zoom bbox Bắc Ninh dùng graticuleStepDeg(). */
+const GRATICULE_STEP_MAX = 15;
+const GRATICULE_NICE_STEPS = [0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10, 15] as const;
+const GRATICULE_TARGET_LINES = 10;
+/** Biên độ vẽ lưới (độ) — theo kích thước màn, không chỉ bbox tỉnh (tránh cụt trên màn lớn). */
+function graticuleDrawHalfSpan(
+  width: number,
+  height: number,
+  R: number,
+  lat0: number
+): { lonHalf: number; latHalf: number } {
+  const degPerPxLat = (180 / Math.PI) / R;
+  const cosPhi0 = Math.cos((lat0 * Math.PI) / 180);
+  const degPerPxLon = (180 / Math.PI) / (R * Math.max(0.15, cosPhi0));
+  const margin = 1.15;
+  return {
+    latHalf: Math.min(88, (height / 2) * degPerPxLat * margin),
+    lonHalf: Math.min(90, (width / 2) * degPerPxLon * margin),
+  };
+}
+
+/** Bước lưới theo span bbox (~1.15°) — 15° không có đường nào trong viewport. */
+function graticuleStepDeg(): number {
+  const span = Math.max(
+    BACNINH_GEO.bbox[2] - BACNINH_GEO.bbox[0],
+    BACNINH_GEO.bbox[3] - BACNINH_GEO.bbox[1]
+  );
+  const raw = span / GRATICULE_TARGET_LINES;
+  for (const step of GRATICULE_NICE_STEPS) {
+    if (step >= raw) return step;
+  }
+  return GRATICULE_STEP_MAX;
+}
 
 // --- Pulse ---
 const PULSE_LIFETIME = 4600;
@@ -162,12 +195,27 @@ function rgba([r, g, b]: RGB, alpha: number): string {
 // Lưới kinh-vĩ tuyến (orthographic, tâm Việt Nam)
 // ================================================================
 
-const GRATICULE_LON0 = 105.8;
-const GRATICULE_LAT0 = 21.3;
-const GRATICULE_LON0_RAD = (GRATICULE_LON0 * Math.PI) / 180;
-const GRATICULE_LAT0_RAD = (GRATICULE_LAT0 * Math.PI) / 180;
-const GRATICULE_SIN_PHI0 = Math.sin(GRATICULE_LAT0_RAD);
-const GRATICULE_COS_PHI0 = Math.cos(GRATICULE_LAT0_RAD);
+/** Tâm bản đồ Bắc Ninh (bbox GeoJSON) — căn giữa viewport khi load / reset. */
+const BACNINH_CENTER_LON = (BACNINH_GEO.bbox[0] + BACNINH_GEO.bbox[2]) / 2;
+const BACNINH_CENTER_LAT = (BACNINH_GEO.bbox[1] + BACNINH_GEO.bbox[3]) / 2;
+
+/** Bán kính orthographic (px) fit bbox tỉnh — mesh xã và lưới kinh-vĩ dùng cùng R. */
+function orthoRadius(width: number, height: number): number {
+  const [minLon, minLat, maxLon, maxLat] = BACNINH_GEO.bbox;
+  const cosMid = Math.cos((BACNINH_CENTER_LAT * Math.PI) / 180);
+  const spanLonRad = ((maxLon - minLon) * cosMid * Math.PI) / 180;
+  const spanLatRad = ((maxLat - minLat) * Math.PI) / 180;
+  let r = (0.85 * width) / spanLonRad;
+  if (r * spanLatRad > 0.8 * height) {
+    r = (0.8 * height) / spanLatRad;
+  }
+  return r;
+}
+
+/** Chuẩn hóa kinh độ về [-180, 180]. */
+function normalizeLon(lonDeg: number): number {
+  return ((lonDeg + 540) % 360) - 180;
+}
 
 /**
  * Orthographic projection: geographic (lon, lat in degrees) to screen (x, y).
@@ -178,25 +226,30 @@ function orthoProject(
   latDeg: number,
   cx: number,
   cy: number,
-  R: number
+  R: number,
+  lon0Deg: number,
+  lat0Deg: number
 ): [number, number] | null {
   const lambda = (lonDeg * Math.PI) / 180;
   const phi = (latDeg * Math.PI) / 180;
   const cosPhi = Math.cos(phi);
   const sinPhi = Math.sin(phi);
-  const dl = lambda - GRATICULE_LON0_RAD;
+  const lon0Rad = (lon0Deg * Math.PI) / 180;
+  const lat0Rad = (lat0Deg * Math.PI) / 180;
+  const sinPhi0 = Math.sin(lat0Rad);
+  const cosPhi0 = Math.cos(lat0Rad);
+  const dl = lambda - lon0Rad;
   const cosDl = Math.cos(dl);
-  const sinDl = Math.sin(dl);
   // Visibility check: dot product with view direction
-  const vis = GRATICULE_SIN_PHI0 * sinPhi + GRATICULE_COS_PHI0 * cosPhi * cosDl;
+  const vis = sinPhi0 * sinPhi + cosPhi0 * cosPhi * cosDl;
   if (vis < 0) return null;
-  const x = cx + R * cosPhi * sinDl;
-  const y = cy - R * (GRATICULE_COS_PHI0 * sinPhi - GRATICULE_SIN_PHI0 * cosPhi * cosDl);
+  const x = cx + R * cosPhi * Math.sin(dl);
+  const y = cy - R * (cosPhi0 * sinPhi - sinPhi0 * cosPhi * cosDl);
   return [x, y];
 }
 
 // ================================================================
-// Bản đồ Bắc Ninh (equirectangular, căn giữa viewport)
+// Bản đồ Bắc Ninh (orthographic WGS84 — cùng hệ với lưới kinh-vĩ)
 // ================================================================
 
 interface BacNinhProjection {
@@ -205,31 +258,32 @@ interface BacNinhProjection {
   cy: number;
 }
 
-/** Chiếu equirectangular fit-width cho 99 polygon phường/xã Bắc Ninh. */
-function projectBacNinh(width: number, height: number): BacNinhProjection | null {
+/**
+ * Chiếu orthographic 99 polygon phường/xã — cùng cx/cy/R và tâm (lon0, lat0)
+ * với drawGraticule để ranh giới xã cong khớp lưới khi pan.
+ */
+function projectBacNinh(
+  width: number,
+  height: number,
+  lon0: number,
+  lat0: number
+): BacNinhProjection | null {
   const rings = BACNINH_GEO.communes;
   if (!rings.length) return null;
 
-  const [minLon, minLat, maxLon, maxLat] = BACNINH_GEO.bbox;
-  const midLon = (minLon + maxLon) / 2;
-  const midLat = (minLat + maxLat) / 2;
-  const cosMid = Math.cos((midLat * Math.PI) / 180);
-
-  let k0 = width / ((maxLon - minLon) * cosMid);
-  if (k0 * (maxLat - minLat) > 0.8 * height) {
-    k0 = (0.8 * height) / (maxLat - minLat);
-  }
-
   const cx = width / 2;
   const cy = height / 2;
+  const R = orthoRadius(width, height);
 
   const parcels: number[][] = [];
   for (const ring of rings) {
     const flat: number[] = [];
     for (const [lon, lat] of ring) {
-      flat.push(cx + (lon - midLon) * cosMid * k0, cy - (lat - midLat) * k0);
+      const pt = orthoProject(lon, lat, cx, cy, R, lon0, lat0);
+      if (!pt) continue;
+      flat.push(pt[0], pt[1]);
     }
-    parcels.push(flat);
+    if (flat.length >= 6) parcels.push(flat);
   }
   return { parcels, cx, cy };
 }
@@ -286,14 +340,51 @@ export function initCadastralBackground(): void {
     lastMove: -Infinity,
   };
 
+  let graticuleLon = BACNINH_CENTER_LON;
+  let graticuleLat = BACNINH_CENTER_LAT;
+  let dragging = false;
+  let activePointerId: number | null = null;
+  let lastPx = 0;
+  let lastPy = 0;
+  let lastTouch: { x: number; y: number } | null = null;
+
   // ================================================================
   // Resize
   // ================================================================
 
+  const graticuleRadius = (): number => orthoRadius(geometry.width, geometry.height);
+
   const reproject = (): void => {
-    const bacninh = projectBacNinh(geometry.width, geometry.height);
+    const bacninh = projectBacNinh(geometry.width, geometry.height, graticuleLon, graticuleLat);
     geometry.parcels = bacninh ? bacninh.parcels : [];
     pulses = pulses.filter((p) => p.parcel < geometry.parcels.length);
+  };
+
+  /** Kéo bản đồ: pixel dưới con trỏ bám theo tỷ lệ tại tâm chiếu. */
+  const applyPanDelta = (dx: number, dy: number): void => {
+    if (dx === 0 && dy === 0) return;
+    const R = graticuleRadius();
+    const latRad = (graticuleLat * Math.PI) / 180;
+    const cosPhi0 = Math.cos(latRad);
+    const degLonPerPx = (180 / Math.PI) / (R * Math.max(0.15, cosPhi0));
+    const degLatPerPx = (180 / Math.PI) / R;
+    graticuleLon = normalizeLon(graticuleLon - dx * degLonPerPx);
+    graticuleLat = Math.max(-85, Math.min(85, graticuleLat - dy * degLatPerPx));
+    reproject();
+    if (reducedMotionQuery.matches) drawStatic();
+  };
+
+  const resetPan = (): void => {
+    graticuleLon = BACNINH_CENTER_LON;
+    graticuleLat = BACNINH_CENTER_LAT;
+    hover = null;
+    reproject();
+    if (reducedMotionQuery.matches) drawStatic();
+  };
+
+  const isInteractiveTarget = (event: Event): boolean => {
+    const target = event.target as Element | null;
+    return !!target?.closest?.('a, button, input, label, select, textarea, form, nav');
   };
 
   const resize = (): void => {
@@ -361,29 +452,48 @@ export function initCadastralBackground(): void {
   const drawGraticule = (): void => {
     const cx = geometry.width / 2;
     const cy = geometry.height / 2;
-    // Ưu tiên hiện rõ lưới kinh-vĩ tuyến toàn màn, không cần thấy trọn viền cầu
-    const R = 0.9 * Math.max(geometry.width, geometry.height);
-    const step = GRATICULE_STEP;
+    const R = graticuleRadius();
+    const step = graticuleStepDeg();
+    const { lonHalf, latHalf } = graticuleDrawHalfSpan(
+      geometry.width,
+      geometry.height,
+      R,
+      graticuleLat
+    );
+    // Vĩ tuyến: span theo màn (bbox zoom)
+    const parallelLatMin = Math.max(-88, graticuleLat - latHalf);
+    const parallelLatMax = Math.min(88, graticuleLat + latHalf);
+    const kpMin = Math.floor(parallelLatMin / step);
+    const kpMax = Math.ceil(parallelLatMax / step);
+    const lonMin = graticuleLon - lonHalf;
+    const lonMax = graticuleLon + lonHalf;
+    // Kinh tuyến: lưới kinh độ tuyệt đối (không neo graticuleLon + k*step)
+    const meridianLonStart = Math.floor(lonMin / step) * step;
+    const meridianLonEnd = lonMax;
+    // Kinh tuyến: quét bán cầu nhìn thấy — span bbox (~0.5°) làm đường dọc cụt
+    const meridianLatMin = Math.max(-89, graticuleLat - 90);
+    const meridianLatMax = Math.min(89, graticuleLat + 90);
+    const phiStep = step <= 0.25 ? 0.25 : step <= 0.5 ? 0.5 : 1;
+    const lambdaStep = step <= 0.25 ? 0.25 : step <= 0.5 ? 0.5 : 1;
 
     // Đĩa cầu rất nhẹ
     context.fillStyle = rgba(palette.grid, 0.03);
     context.beginPath();
     context.arc(cx, cy, R, 0, Math.PI * 2);
     context.fill();
-    context.strokeStyle = rgba(palette.grid, isDark() ? 0.1 : 0.13);
+    context.strokeStyle = rgba(palette.grid, isDark() ? 0.1 : 0.12);
     context.lineWidth = 1;
     context.stroke();
 
-    // Kinh tuyến (meridian): λ = λ0 + k*step
-    context.lineWidth = 1;
-    context.strokeStyle = rgba(palette.grid, isDark() ? 0.16 : 0.2);
-    for (let km = -Math.floor(180 / step); km <= Math.floor(180 / step); km++) {
-      if (km === 0) continue; // bỏ trùng λ0
-      const lon = GRATICULE_LON0 + km * step;
+    // Kinh tuyến — λ cố định WGS84, dịch trên màn khi pan (cùng logic vĩ tuyến)
+    context.lineWidth = 0.75;
+    context.strokeStyle = rgba(palette.grid, isDark() ? 0.14 : 0.17);
+    for (let lon = meridianLonStart; lon <= meridianLonEnd; lon += step) {
+      const meridianLon = normalizeLon(lon);
       context.beginPath();
       let started = false;
-      for (let phi = -88; phi <= 88; phi += 2) {
-        const pt = orthoProject(lon, phi, cx, cy, R);
+      for (let phi = meridianLatMin; phi <= meridianLatMax; phi += phiStep) {
+        const pt = orthoProject(meridianLon, phi, cx, cy, R, graticuleLon, graticuleLat);
         if (pt) {
           if (!started) {
             context.moveTo(pt[0], pt[1]);
@@ -396,13 +506,14 @@ export function initCadastralBackground(): void {
       context.stroke();
     }
 
-    // Vĩ tuyến (parallel): φ = k*step
-    for (let kp = -Math.floor(90 / step); kp <= Math.floor(90 / step); kp++) {
+    // Vĩ tuyến — ngang theo span kinh độ đủ phủ mép màn
+    for (let kp = kpMin; kp <= kpMax; kp++) {
       const lat = kp * step;
+      if (lat < -88 || lat > 88) continue;
       context.beginPath();
       let started = false;
-      for (let lambda = GRATICULE_LON0 - 180; lambda <= GRATICULE_LON0 + 180; lambda += 2) {
-        const pt = orthoProject(lambda, lat, cx, cy, R);
+      for (let lambda = lonMin; lambda <= lonMax; lambda += lambdaStep) {
+        const pt = orthoProject(lambda, lat, cx, cy, R, graticuleLon, graticuleLat);
         if (pt) {
           if (!started) {
             context.moveTo(pt[0], pt[1]);
@@ -524,6 +635,11 @@ export function initCadastralBackground(): void {
 
   /** Track which commune the pointer is over; resets the enter animation on change. */
   const updateHover = (now: number): void => {
+    if (dragging) {
+      hover = null;
+      mouse.strength = 0;
+      return;
+    }
     if (mouse.strength <= 0.01) {
       hover = null;
       return;
@@ -985,6 +1101,70 @@ export function initCadastralBackground(): void {
     mouse.lastMove = -Infinity;
   };
 
+  const onPointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0) return;
+    if (isInteractiveTarget(event)) return;
+    dragging = true;
+    activePointerId = event.pointerId;
+    lastPx = event.clientX;
+    lastPy = event.clientY;
+    lastTouch = null;
+    hover = null;
+    mouse.strength = 0;
+    try {
+      canvas.setPointerCapture(event.pointerId);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const onPointerMove = (event: PointerEvent): void => {
+    if (!dragging || activePointerId !== event.pointerId) return;
+    const dx = event.clientX - lastPx;
+    const dy = event.clientY - lastPy;
+    lastPx = event.clientX;
+    lastPy = event.clientY;
+    applyPanDelta(dx, dy);
+  };
+
+  const endDrag = (event?: PointerEvent): void => {
+    if (event && activePointerId !== null && event.pointerId !== activePointerId) return;
+    dragging = false;
+    activePointerId = null;
+    lastTouch = null;
+    if (event) {
+      try {
+        canvas.releasePointerCapture(event.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  const onTouchStart = (event: TouchEvent): void => {
+    if (isInteractiveTarget(event)) return;
+    if (event.touches.length !== 1) {
+      lastTouch = null;
+      return;
+    }
+    lastTouch = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+  };
+
+  const onTouchMove = (event: TouchEvent): void => {
+    if (!lastTouch || event.touches.length !== 1) return;
+    event.preventDefault();
+    const dx = event.touches[0].clientX - lastTouch.x;
+    const dy = event.touches[0].clientY - lastTouch.y;
+    lastTouch = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+    if (dx !== 0 || dy !== 0) applyPanDelta(dx, dy);
+  };
+
+  const onDblClick = (event: MouseEvent): void => {
+    if (isInteractiveTarget(event)) return;
+    event.preventDefault();
+    resetPan();
+  };
+
   const onSchemeChange = (): void => {
     palette = isDark() ? PALETTE_DARK : PALETTE_LIGHT;
     if (reducedMotionQuery.matches) drawStatic();
@@ -995,6 +1175,17 @@ export function initCadastralBackground(): void {
   window.addEventListener('resize', resize);
   window.addEventListener('mousemove', onMouseMove);
   document.documentElement.addEventListener('mouseleave', onMouseLeave);
+  canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerup', endDrag);
+  canvas.addEventListener('pointercancel', endDrag);
+  window.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove);
+  window.addEventListener('pointerup', endDrag);
+  window.addEventListener('pointercancel', endDrag);
+  window.addEventListener('touchstart', onTouchStart, { passive: true });
+  window.addEventListener('touchmove', onTouchMove, { passive: false });
+  window.addEventListener('dblclick', onDblClick);
 
   resize();
   entities = spawnEntities(geometry);
